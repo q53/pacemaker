@@ -1,0 +1,207 @@
+#!/bin/bash
+
+if test -n "${OCF_FUNCTIONS_DIR}" ; then
+        if test -e "${OCF_FUNCTIONS_DIR}/ocf-shellfuncs" ; then
+                . "${OCF_FUNCTIONS_DIR}/ocf-shellfuncs"
+        elif test -e "${OCF_FUNCTIONS_DIR}/.ocf-shellfuncs" ; then
+                . "${OCF_FUNCTIONS_DIR}/.ocf-shellfuncs"
+        fi
+else
+        if test -e "${OCF_ROOT}/lib/heartbeat/ocf-shellfuncs" ; then
+                . "${OCF_ROOT}/lib/heartbeat/ocf-shellfuncs"
+        elif test -e "${OCF_ROOT}/resource.d/heartbeat/.ocf-shellfuncs"; then
+                . "${OCF_ROOT}/resource.d/heartbeat/.ocf-shellfuncs"
+        fi
+fi
+
+
+
+meta_data() {
+	cat <<END
+<?xml version="1.0"?>
+<!DOCTYPE resource-agent SYSTEM "ra-api-1.dtd">
+<resource-agent name="vz" version="0.9">
+<version>1.0</version>
+
+<longdesc lang="en">
+The vz container HA resource agent. Start and stop a particular container 
+by hostname. Container configs syncronization is up to user.
+</longdesc>
+<shortdesc lang="en">vz container resource agent.</shortdesc>
+
+<parameters>
+
+<parameter name="hostname" required="1" unique="1">
+<longdesc lang="en">
+The vz container hostame.
+</longdesc>
+<shortdesc lang="en">container hostname.</shortdesc>
+<content type="string"/>
+</parameter>
+
+</parameters>
+
+<actions>
+<action name="start"        timeout="90" />
+<action name="stop"         timeout="90" />
+<action name="monitor"      timeout="30" interval="30" depth="0" />
+<action name="meta-data"    timeout="5" />
+<action name="validate-all"   timeout="30" />
+<action name="notify" timeout="60" />
+</actions>
+
+</resource-agent>
+END
+
+}
+
+
+vz_usage() {
+	cat <<END
+usage: $0 {start|stop|monitor|validate-all|meta-data}
+Expects to have a fully populated OCF RA-compliant environment set.
+END
+}
+
+
+vz_validate() {
+  check_binary vzctl
+  check_binary vzlist
+  check_binary grep
+  service vz status 2>/dev/null 1>&2
+  if [ $? -ne 0 ] ; then
+    ocf_exit_reason "vz not running on the node..."
+    exit $OCF_ERR_INSTALLED
+  fi
+  return $OCF_SUCCESS
+}
+
+
+vz_monitor() {
+  local cs
+  local rc
+  cs=$(vzlist -a -H -o status -N "$OCF_RESKEY_hostname")
+  case "$cs" in
+  "")
+    ocf_log err "vz container is not on the node."
+    rc=$OCF_ERR_INSTALLED
+  ;; 
+  suspended|stopped)
+    ocf_log info "vz is not running."
+    rc=$OCF_NOT_RUNNING
+  ;;
+  running)
+    rc=$OCF_SUCCESS
+    ocf_log debug "Looks like vz container is ok."
+  ;;
+  *)
+    rc=$OCF_ERR_GENERIC
+    ocf_log err "Container status is '$cs'. Not clear what to do..."
+  ;;
+  esac
+  return $rc
+}
+
+
+_find_vz_ctid() {
+  local ctid
+  ctid=$(vzlist -a -H -o ctid -N "$OCF_RESKEY_hostname")
+  return ${ctid//[[:space:]]/}
+}
+
+
+vz_start() {
+  local ctid
+  local status
+
+  _find_vz_ctid
+  ctid=$?
+  if ! ocf_is_decimal $ctid ; then
+    ocf_log err "CTID for '$OCF_RESKEY_hostname' not found. Not clear what to do..."
+    exit $OCF_ERR_GENERIC
+  fi
+
+  vzctl status $ctid | grep -q -E "running"
+  if [ $? -eq 0 ]; then
+    ocf_log debug "'$ctid' already running."
+    return $OCF_SUCCESS
+  fi
+
+  ocf_run vzctl start $ctid
+
+  if [ $? -ne 0 ]; then
+    status=$(vzctl status $ctid)
+    ocf_log err "Something went wrong. Status '$ctid' is '$status'..."
+    return $OCF_ERR_GENERIC
+  fi
+
+  return $OCF_SUCCESS
+
+}
+
+
+vz_stop() {
+  local ctid
+  local status
+
+  _find_vz_ctid
+  ctid=$?
+  if ! ocf_is_decimal $ctid ; then
+    ocf_log err "CTID for '$OCF_RESKEY_hostname' not found. Not clear what to do..."
+    exit $OCF_ERR_GENERIC
+  fi
+
+  vzctl status $ctid | grep -q -E "suspended|stopped"
+  if [ $? -eq 0 ]; then
+    ocf_log debug "'$ctid' already stopped."
+    return $OCF_SUCCESS
+  fi
+
+  ocf_run vzctl stop $ctid
+
+  if [ $? -ne 0 ]; then
+    status=$(vzctl status $ctid)
+    ocf_log err "Something went wrong. Status '$ctid' is '$status'..."
+    return $OCF_ERR_GENERIC
+  fi
+
+  return $OCF_SUCCESS
+}
+
+
+case $__OCF_ACTION in
+  meta-data) 
+    meta_data
+    exit $OCF_SUCCESS
+  ;;
+  start)
+    vz_validate
+    if ocf_is_clone; then
+      ocf_exit_reason "DANGER! Resource is NOT cluster-aware!"
+      ocf_log err "DO NOT RUN IT AS A CLONE!"
+      exit $OCF_ERR_CONFIGURED
+    fi 
+    vz_start
+  ;;
+  stop)
+    vz_stop
+  ;;
+  monitor)
+    vz_validate
+    vz_monitor
+  ;;
+  validate-all)
+    vz_validate
+  ;;
+  usage|help)
+    vz_usage
+    exit $OCF_SUCCESS
+  ;;
+  *)
+    vz_usage
+    exit $OCF_ERR_UNIMPLEMENTED
+  ;;
+esac
+rc=$?
+ocf_log debug "${OCF_RESOURCE_INSTANCE} $__OCF_ACTION : $rc"
+exit $rc
