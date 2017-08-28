@@ -1,0 +1,270 @@
+#!/bin/sh
+#
+# Resource script for openvpn
+#
+# Description:  Manages openvpn as an OCF resource in 
+#               an High Availability setup.
+#
+# Author: Alexey Kurnosov <ocf@kurnosov.spb.ru> 
+# License: GNU General Public License (GPL) 
+#
+#
+#  usage: $0 {start|stop|status|monitor|validate-all|meta-data}
+#
+#  The "start" arg starts openvpn.
+#
+#  The "stop" arg stops it.
+#
+# OCF parameters:
+# OCF_RESKEY_binpath
+# OCF_RESKEY_conffile
+# OCF_RESKEY_confdir
+# OCF_RESKEY_pidfile
+# OCF_RESKEY_options
+#
+# Note:This RA requires that the openvpn config files has a "pid file" 
+# entry so that it is able to act on the correct process
+##########################################################################
+# Initialization:
+
+: ${OCF_FUNCTIONS_DIR=${OCF_ROOT}/lib/heartbeat}
+. ${OCF_FUNCTIONS_DIR}/ocf-shellfuncs
+
+USAGE="Usage: $0 {start|stop|status|monitor|validate-all|meta-data}";
+
+##########################################################################
+
+usage() 
+{
+  echo $USAGE >&2
+}
+
+meta_data() 
+{
+cat <<END
+<?xml version="1.0"?>
+<!DOCTYPE resource-agent SYSTEM "ra-api-1.dtd">
+<resource-agent name="openvpn">
+<version>1.0</version>
+<longdesc lang="en">
+This script manages openvpn daemon
+</longdesc>
+<shortdesc lang="en">Manages an openvpn daemon</shortdesc>
+
+<parameters>
+
+<parameter name="binpath">
+<longdesc lang="en">
+The openvpn binary path.
+For example, "/usr/bin/openvpn"
+</longdesc>
+<shortdesc lang="en">Openvpn binary</shortdesc>
+<content type="string" default="openvpn"/>
+</parameter>
+
+<parameter name="conffile" required="1" unique="1">
+<longdesc lang="en">
+The openvpn daemon configuration file name. 
+For example, "openvpn.conf"
+</longdesc>
+<shortdesc lang="en">Configuration file name</shortdesc>
+<content type="string"/>
+</parameter>
+
+<parameter name="confdir">
+<longdesc lang="en">
+The openvpn daemon configuration directory path. 
+For example, "/etc/openvpn"
+</longdesc>
+<shortdesc lang="en">Configuration directory path</shortdesc>
+<content type="string" default="/etc/openvpn" />
+</parameter>
+
+<parameter name="pidfile" required="1" unique="1">
+<longdesc lang="en">
+The openvpn daemon PID file path. 
+For example, "/var/run/openvpn/openvpn.pid"
+</longdesc>
+<shortdesc lang="en">Configuration PID file path</shortdesc>
+<content type="string"/>
+</parameter>
+
+<parameter name="options">
+<longdesc lang="en">
+The openvpn daemon options. 
+</longdesc>
+<shortdesc lang="en">Configuration options</shortdesc>
+<content type="string"/>
+</parameter>
+
+
+</parameters>
+
+<actions>
+<action name="start" timeout="20s"/>
+<action name="stop" timeout="20s"/>
+<action name="monitor" depth="0" timeout="20s" interval="60s" />
+<action name="validate-all" timeout="20s"/>
+<action name="meta-data"  timeout="5s"/>
+</actions>
+</resource-agent>
+END
+exit $OCF_SUCCESS
+}
+
+openvpn_status()
+{
+  if [ -n "$OCF_RESKEY_pidfile" -a -f $OCF_RESKEY_pidfile ]; then
+    # openvpn is probably running
+    PID=`cat $OCF_RESKEY_pidfile`
+    if [ -n "$PID" ]; then
+      if kill -0 $PID 2>/dev/null; then
+        ocf_log info "openvpn daemon running"
+        return $OCF_SUCCESS
+      else
+        ocf_log info "openvpn daemon is not running but pid file exists"
+        return $OCF_ERR_GENERIC
+      fi
+    else
+      ocf_exit_reason "PID file empty!"
+      return $OCF_ERR_GENERIC
+    fi
+  fi
+    
+  # openvpn is not running
+  ocf_log info "openvpn daemon is not running"
+  return $OCF_NOT_RUNNING
+}
+
+openvpn_start()
+{
+  # if openvpn is running return success
+  openvpn_status
+  retVal=$?
+  if [ $retVal -eq $OCF_SUCCESS ]; then
+    exit $OCF_SUCCESS
+  elif [ $retVal -ne $OCF_NOT_RUNNING ]; then
+    ocf_exit_reason "Error. Unknown status."
+    exit $OCF_ERR_GENERIC
+  fi
+
+  if [ -n "$OCF_RESKEY_binpath" ]; then
+    COMMAND="$OCF_RESKEY_binpath --writepid $OCF_RESKEY_pidfile"
+  else
+    COMMAND="openvpn --writepid $OCF_RESKEY_pidfile"
+  fi
+
+  if [ -n "$OCF_RESKEY_options" ]; then
+    if [[ $OCF_RESKEY_options == *"--daemon"* ]]; then
+      COMMAND="$COMMAND $OCF_RESKEY_options"
+    else
+      COMMAND="$COMMAND --daemon $OCF_RESKEY_options"
+    fi
+  fi
+
+  if [ -n "$OCF_RESKEY_confdir" -a -d "$OCF_RESKEY_confdir" ]; then
+    COMMAND="$COMMAND --cd $OCF_RESKEY_confdir"
+  elif [ -n "$OCF_RESKEY_confdir" ]; then
+    ocf_exit_reason "Error. Confdir does not exists."
+    exit $OCF_ERR_GENERIC
+  else
+    COMMAND="$COMMAND --cd /etc/openvpn"
+  fi
+
+  if [ -n "$OCF_RESKEY_conffile" ]; then
+    COMMAND="$COMMAND --config $OCF_RESKEY_conffile"
+  fi
+
+  ocf_run $COMMAND;
+  if [ $? -ne 0 ]; then
+    ocf_exit_reason "Error. openvpn returned error."
+    exit $OCF_ERR_GENERIC
+  fi
+
+  ocf_log info "Started openvpn daemon."
+  exit $OCF_SUCCESS
+}
+
+
+openvpn_stop()
+{
+  if openvpn_status ; then
+    if [ -n "$PID" ] ; then
+      if ! $( kill $PID 2>/dev/null ); then
+        kill -s KILL $PID
+        sleep 1
+        if kill -0 $PID 2>/dev/null; then
+          ocf_exit_reason "Error. Could not stop openvpn daemon."
+          return $OCF_ERR_GENERIC
+        fi
+      fi
+      rm "$OCF_RESKEY_pidfile" 2>/dev/null
+    fi
+  fi
+  ocf_log info "Stopped openvpn daemon."
+  exit $OCF_SUCCESS
+}
+
+openvpn_monitor()
+{
+  openvpn_status
+}
+
+openvpn_validate_all()
+{
+  if [ -n "$OCF_RESKEY_binpath" -a ! -x "$OCF_RESKEY_binpath" ]; then
+    ocf_exit_reason "Binary path $OCF_RESKEY_binpath does not exist."
+    exit $OCF_ERR_INSTALLED
+  fi
+  if [ -n "$OCF_RESKEY_confdir" -a ! -d "$OCF_RESKEY_confdir" ]; then
+    ocf_exit_reason "Confdir $OCF_RESKEY_conffile does not exist."
+    exit $OCF_ERR_GENERIC
+  fi
+
+  return $OCF_SUCCESS
+}
+
+#
+# Main
+#
+ 
+if [ $# -ne 1 ]; then
+  usage
+  exit $OCF_ERR_ARGS
+fi
+
+case $1 in
+  start)
+    openvpn_start
+    ;;
+  
+  stop)
+    openvpn_stop
+    ;;
+  status)
+    openvpn_status
+    ;;
+
+  monitor)
+    openvpn_monitor
+    ;;
+
+  validate-all)
+      openvpn_validate_all
+      ;;
+
+  meta-data)
+      meta_data
+      ;;
+
+  usage)
+    usage
+    exit $OCF_SUCCESS
+    ;;
+
+  *)
+    usage
+    exit $OCF_ERR_UNIMPLEMENTED
+    ;;
+esac
+
